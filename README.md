@@ -6,8 +6,7 @@ A BSD-licensed core for TI's TMS32010 DSP © 2024 Sehyeon Kim(Raki)
 * FPGA proven.
 
 ## Current status
-**BETA**
-✅Verified that it runs the code from an arcade game "Twin Cobra" correctly and has no issues interacting with the main CPU.
+v1.0 – ✅Verified using the arcade games Twin Cobra, Sky Shark, and Wardner by atrac17.
 
 ## Module instantiation
 The steps below show how to instantiate the IKA32010 module in Verilog:
