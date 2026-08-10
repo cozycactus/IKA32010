@@ -54,6 +54,11 @@ IKA32010 u_main (
 * `IKA32010_DISASSEMBLY_SHOWID` displays the device ID in a console. This is useful when debugging a system with multiple DSPs or a system with another CPU.
 * `IKA32010_DEVICE_ID` and the following string will name the device.
 
+## Open-source validation
+* `make test` runs the self-checking H3000 conformance regressions with Icarus Verilog.
+* `make lint` elaborates the core with Verilator and reports lint warnings.
+* `make synth` synthesizes the core for the ECP5 architecture with Yosys. This checks the core RTL only; a board wrapper and pin constraints are still required for a bitstream.
+
 ## FPGA resource usage
 * Altera EP4CE6E22C8: 1243 LEs, 275 registers, BRAM 4096 bits, two 9-bit multiplier elements, fmax=44.98MHz(slow 85C), fmax=103.95MHz(fast 0C)
 * Altera 5CSEBA6U23I7(MiSTer): 601 ALMs, 275 registers, BRAM 4096 bits, 1 DSP block, fmax=60.28MHz(slow 100C), fmax=132.33MHz(fast -40C)

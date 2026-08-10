@@ -30,10 +30,10 @@ module IKA32010 (
 
 
 //debug output
-`define IKA32010_DISASSEMBLY
-`define IKA32010_DISASSEMBLY_SHOWID
-`define IKA32010_DEVICE_ID "ikakawa"
 `ifdef IKA32010_DISASSEMBLY
+`ifndef IKA32010_DEVICE_ID
+`define IKA32010_DEVICE_ID "ikakawa"
+`endif
 `include "IKA32010_disasm.sv"
 `endif
 
@@ -332,7 +332,7 @@ end
 reg             reg_dp_set, reg_dp_rst;
 reg             reg_dp;
 always @(posedge i_EMUCLK) begin
-    if(i_RS_n) reg_dp <= 1'b0;
+    if(!i_RS_n) reg_dp <= 1'b0;
     else begin if(cyc_ncen) begin
         case({reg_dp_set, reg_dp_rst})
             2'b10: reg_dp <= 1'b1;
@@ -392,7 +392,9 @@ always @(posedge i_EMUCLK) begin
 end
 
 reg             mul_op1_source_sel;
-wire    [15:0]  mul_op1 = mul_op1_source_sel ? reg_wrbus : {{3{reg_wrbus[12]}}, reg_wrbus[12:0]}; //sign extended
+wire    [15:0]  mul_op1 = mul_op1_source_sel
+    ? reg_wrbus
+    : {{3{if_opcodereg[12]}}, if_opcodereg[12:0]}; //signed 13-bit MPYK immediate
 reg             mul_en;
 
 IKA32010_multiplier u_multiplier (
@@ -407,12 +409,13 @@ IKA32010_multiplier u_multiplier (
 ////
 
 reg             stk_data_sel; //0 = ACC, 1 = PC
+reg             stk_pc_next;  //push PC+1 for two-word direct CALL
 reg             stk_pop, stk_push;
 
 IKA32010_stack u_stack (
     .i_EMUCLK(i_EMUCLK), .i_RST_n(i_RS_n), .i_CEN(cyc_ncen),
     .i_PUSH(stk_push), .i_POP(stk_pop),
-    .i_DIN(stk_data_sel ? if_pc : reg_wrbus[11:0]), .o_DOUT(stk_output)
+    .i_DIN(stk_data_sel ? (stk_pc_next ? if_pc_next : if_pc) : reg_wrbus[11:0]), .o_DOUT(stk_output)
 );
 
 
@@ -578,6 +581,7 @@ always @(*) begin
 
     //stack
     stk_data_sel = STACK_DATA_PC;
+    stk_pc_next = NO;
     stk_pop = NO; stk_push = NO;
 
     //shifter enable
@@ -1429,6 +1433,7 @@ always @(*) begin
                     //deny interrupt request
                     if_opcodereg_force_iack = NO; 
                     stk_push = YES; stk_data_sel = STACK_DATA_PC;
+                    stk_pc_next = YES;
                 end
                 else if(ex_inst_cycle == 2'd1) begin
                     busctrl_req = OPCODE_READ; busctrl_addr_muxsel = BUSCTRL_ADDR_PC;
@@ -1550,7 +1555,6 @@ always @(*) begin
 
             //MPYK - Multiply T register with immediate operand; store product in P register
             16'b100?_????_????_????: begin
-                register_wrbus_source_sel = WRBUS_SOURCE_IMM; //load operand from instruction register(immediate)
                 mul_en = YES; mul_op1_source_sel = MUL_OP1_SOURCE_IMM;
 
                 `ifdef IKA32010_DISASSEMBLY 
@@ -1725,8 +1729,6 @@ always @(*) begin
                 end
                 else if(ex_inst_cycle == 2'd2) begin
                     busctrl_req = OPCODE_READ; busctrl_addr_muxsel = BUSCTRL_ADDR_PC;
-                    register_wrbus_source_sel = WRBUS_SOURCE_INLATCH;
-                    ram_wr = YES;
 
                     if(if_opcodereg[7]) begin 
                         reg_ar_inc = if_opcodereg[5]; reg_ar_dec = if_opcodereg[4]; 
@@ -1916,23 +1918,32 @@ module IKA32010_ram (
     output  wire    [15:0]  o_DOUT
 );
 
+function automatic [7:0] physical_data_address(input [7:0] logical_address);
+    physical_data_address = logical_address[7]
+        ? {4'b1000, logical_address[3:0]}
+        : logical_address;
+endfunction
+
 wire            ram_we = i_DMOV ? 1'b1 : i_WE;
-wire    [7:0]   ram_rdaddr = i_ADDR;
-wire    [7:0]   ram_wraddr = i_DMOV ? {i_ADDR[7], i_ADDR[6:0] + 7'd1} : i_ADDR;
+wire    [7:0]   ram_rdaddr = physical_data_address(i_ADDR);
+wire    [7:0]   ram_dmov_logical_addr = i_ADDR + 8'd1;
+wire    [7:0]   ram_wraddr = physical_data_address(
+    i_DMOV ? ram_dmov_logical_addr : i_ADDR
+);
 reg     [15:0]  ram_dout;
 wire    [15:0]  ram_din = i_DMOV ? ram_dout : i_DIN;
 
 assign  o_DOUT = ram_dout;
 
 //simple dual port RAM
-reg     [15:0]  RAM[0:255];
+reg     [15:0]  RAM[0:143];
 always @(posedge i_EMUCLK) ram_dout <= RAM[ram_rdaddr];
 always @(posedge i_EMUCLK) if(ram_we) RAM[ram_wraddr] <= ram_din;
 
 //initialize 
 integer i;
 initial begin
-    for(i=0; i<256; i=i+1) begin
+    for(i=0; i<144; i=i+1) begin
         RAM[i] <= 16'h0000;
     end
 end
