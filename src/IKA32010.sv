@@ -17,6 +17,9 @@ module IKA32010 (
     output  reg             o_WE_n, //OUT instruction
 
     output  wire    [11:0]  o_AOUT,
+    // Physical first-generation C10 data-RAM address.  Logical page-1
+    // addresses $80-$FF mirror onto the sixteen cells $80-$8F.
+    output  wire    [7:0]   o_DATA_ADDR,
     input   wire    [15:0]  i_DIN,
     output  reg     [15:0]  o_DOUT,
     output  reg             o_DOUT_OE,
@@ -525,7 +528,8 @@ reg             ram_dmov, ram_rd, ram_wr;
 
 IKA32010_ram u_ram (
     .i_EMUCLK(i_EMUCLK),
-    .i_DMOV(ram_dmov), .i_WE(ram_wr), .i_ADDR(ram_addr), .i_DIN(reg_wrbus), .o_DOUT(ram_output)
+    .i_DMOV(ram_dmov), .i_WE(ram_wr), .i_ADDR(ram_addr), .i_DIN(reg_wrbus),
+    .o_DOUT(ram_output), .o_PHYSICAL_ADDR(o_DATA_ADDR)
 );
 
 
@@ -1982,7 +1986,8 @@ module IKA32010_ram (
     input   wire            i_WE,
     input   wire    [7:0]   i_ADDR,
     input   wire    [15:0]  i_DIN,
-    output  wire    [15:0]  o_DOUT
+    output  wire    [15:0]  o_DOUT,
+    output  wire    [7:0]   o_PHYSICAL_ADDR
 );
 
 function automatic [7:0] physical_data_address(input [7:0] logical_address);
@@ -2001,6 +2006,7 @@ reg     [15:0]  ram_dout;
 wire    [15:0]  ram_din = i_DMOV ? ram_dout : i_DIN;
 
 assign  o_DOUT = ram_dout;
+assign  o_PHYSICAL_ADDR = ram_rdaddr;
 
 //simple dual port RAM
 reg     [15:0]  RAM[0:143];

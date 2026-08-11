@@ -9,6 +9,7 @@ wire            men_n;
 wire            den_n;
 wire            we_n;
 wire    [11:0]  address;
+wire    [7:0]   data_address;
 reg     [15:0]  data_in = 16'h7F80;
 wire    [15:0]  data_out;
 wire            data_out_oe;
@@ -64,6 +65,7 @@ IKA32010 dut (
     .o_DEN_n(den_n),
     .o_WE_n(we_n),
     .o_AOUT(address),
+    .o_DATA_ADDR(data_address),
     .i_DIN(data_in),
     .o_DOUT(data_out),
     .o_DOUT_OE(data_out_oe),
@@ -77,7 +79,8 @@ IKA32010_ram ram_dut (
     .i_WE(ram_we),
     .i_ADDR(ram_address),
     .i_DIN(ram_data_in),
-    .o_DOUT(ram_data_out)
+    .o_DOUT(ram_data_out),
+    .o_PHYSICAL_ADDR()
 );
 
 IKA32010_alu alu_dut (
@@ -264,6 +267,23 @@ initial begin
     ram_read_check(8'hFF, 16'h2222, "$FF aliases the physical $8F cell");
     ram_write(8'h9F, 16'h3333);
     ram_read_check(8'h8F, 16'h3333, "$9F and $8F share one physical cell");
+
+    // The top-level provenance pin exposes that same physical address.  It
+    // lets an H3000 bus wrapper prove that simultaneous PEL OUT operations
+    // came from the same C10 cell without exposing the RAM contents.
+    force dut.reg_dp = 1'b1;
+    force dut.if_opcodereg = 16'h007F;
+    #1;
+    check_condition(data_address === 8'h8F,
+                    "top-level data address maps direct $FF to physical $8F");
+    force dut.if_opcodereg = 16'h0080;
+    force dut.ar_addr_output = 8'h9A;
+    #1;
+    check_condition(data_address === 8'h8A,
+                    "top-level data address maps indirect $9A to physical $8A");
+    release dut.ar_addr_output;
+    release dut.if_opcodereg;
+    release dut.reg_dp;
 
     // DMOV increments the logical address first. $8F + 1 is logical $90,
     // which aliases physical $80.

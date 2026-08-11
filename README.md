@@ -31,6 +31,7 @@ IKA32010 u_main (
     .o_WE_n                 (                           ),
 
     .o_AOUT                 (                           ),
+    .o_DATA_ADDR            (                           ),
     .i_DIN                  (                           ),
     .o_DOUT                 (                           ),
     .o_DOUT_OE              (                           ),
@@ -47,6 +48,9 @@ IKA32010 u_main (
 * `o_CLKOUT` is the divided clock from the DSP.
 * `i_RS_n` is the synchronous reset.
 * `o_DOUT_OE` is the output enable for FPGA's tri-state I/O driver.
+* `o_DATA_ADDR` exposes the physical first-generation data-RAM address used by
+  the current operand. Logical page-1 addresses `$80-$FF` mirror onto physical
+  cells `$80-$8F`; this output is observability only and adds no core state.
 * The other signals have the same function as the pins on the original chip.
 
 ## Compilation options
