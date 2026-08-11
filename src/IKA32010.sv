@@ -273,15 +273,20 @@ end
 //interrupt enable bit
 reg             reg_intm; //0 = interrupt enabled, 1 = interrupt disabled
 reg             reg_intm_en, reg_intm_dis;
+wire            int_entry_accept;
 always @(posedge i_EMUCLK) begin
     if(!i_RS_n) reg_intm <= 1'b1;
     else begin if(cyc_ncen) begin
-        case({reg_intm_en, reg_intm_dis})
-            2'b00: reg_intm <= reg_intm;
-            2'b01: reg_intm <= 1'b1;
-            2'b10: reg_intm <= 1'b0;
-            2'b11: reg_intm <= reg_intm;
-        endcase
+        // TI automatically masks further interrupts as entry is accepted.
+        if(int_entry_accept) reg_intm <= 1'b1;
+        else begin
+            case({reg_intm_en, reg_intm_dis})
+                2'b00: reg_intm <= reg_intm;
+                2'b01: reg_intm <= 1'b1;
+                2'b10: reg_intm <= 1'b0;
+                2'b11: reg_intm <= reg_intm;
+            endcase
+        end
     end end
 end
 
@@ -295,7 +300,20 @@ reg             reg_ar_ld; //AR reg load
 reg             reg_ar_inc, reg_ar_dec; //increase decrease AR
 reg     [15:0]  reg_ar[0:1];
 
-assign          ar_data_output = reg_ar[if_opcodereg[8]]; //used to save AR data 
+reg     [15:0]  ar_data_output_postmodified;
+always @(*) begin
+    ar_data_output_postmodified = reg_ar[if_opcodereg[8]];
+    if(if_opcodereg[8] == reg_arp) begin
+        case({reg_ar_inc, reg_ar_dec})
+            2'b01: ar_data_output_postmodified[8:0] =
+                reg_ar[if_opcodereg[8]][8:0] - 9'd1;
+            2'b10: ar_data_output_postmodified[8:0] =
+                reg_ar[if_opcodereg[8]][8:0] + 9'd1;
+            default: ar_data_output_postmodified = reg_ar[if_opcodereg[8]];
+        endcase
+    end
+end
+assign          ar_data_output = ar_data_output_postmodified; //SAR observes self postmodify
 wire    [7:0]   ar_addr_output = reg_ar[reg_arp][7:0]; //use AR data as RAM address
 
 
@@ -314,10 +332,12 @@ always @(posedge i_EMUCLK) begin
         endcase
 
         //auxillary register
-        if(reg_ar_ld) begin
-            reg_ar[if_opcodereg[8]] <= reg_wrbus;
-        end
-        else begin
+        if(reg_ar_ld) reg_ar[if_opcodereg[8]] <= reg_wrbus;
+
+        // Address postmodify uses the old ARP.  LAR suppresses it only when
+        // the addressed AR is also the LAR destination; loading the other AR
+        // must still modify the current address register.
+        if(!reg_ar_ld || if_opcodereg[8] != reg_arp) begin
             case({reg_ar_inc, reg_ar_dec})
                 2'b00: reg_ar[reg_arp]      <= reg_ar[reg_arp];
                 2'b01: reg_ar[reg_arp][8:0] <= reg_ar[reg_arp][8:0] - 9'd1; //see page 2-9 of the user manual(pdf p32)
@@ -350,25 +370,28 @@ end
 ////
 
 reg             int_ack;
-reg             int_n_z, int_n_zz, int_n_zzz, int_latched;
+reg             int_n_z, int_n_zz, int_latched;
 wire            int_rq = int_latched & ~reg_intm;
+assign          int_entry_accept = int_rq && if_opcodereg_force_iack &&
+                    (if_pc_modesel == PC_LOAD_INTERRUPT);
 always @(posedge i_EMUCLK) begin
     if(!i_RS_n) begin
         int_n_z <= 1'b1;
         int_n_zz <= 1'b1;
-        int_n_zzz <= 1'b1;
     end
     else begin
         if(cyc_ncen) int_n_z <= i_INT_n;
         if(cyc_pcen) int_n_zz <= int_n_z;
-        if(cyc_ncen) int_n_zzz <= int_n_zz;
     end
 
     if(!i_RS_n) int_latched <= 1'b0;
     else begin if(cyc_ncen) begin
         if(int_ack) int_latched <= 1'b0;
         else begin
-            if(~int_n_zz & int_n_zzz) int_latched <= 1'b1;
+            // Keep a synchronized low level active.  After acknowledge a
+            // still-low pin therefore becomes pending again while INTM masks
+            // it, matching TI's held-low interrupt behavior.
+            if(!int_n_zz) int_latched <= 1'b1;
         end
     end end
 end
@@ -445,7 +468,7 @@ reg             alu_pbsel; //alu port B source select(0 = shifter, 1 = multiplie
 
 reg             alu_acc_ld;
 wire    [31:0]  alu_acc_output;
-reg             alu_v_set, alu_v_rst;
+reg             alu_v_set, alu_v_rst, alu_v_update;
 wire            alu_flag_zero, alu_flag_neg, alu_flag_ovfl;
 
 IKA32010_alu u_alu (
@@ -454,6 +477,7 @@ IKA32010_alu u_alu (
     .i_ALU_PA(alu_acc_output), .i_ALU_PB(alu_pbsel ? reg_p : sha_output),
     .i_ALU_ACC_LD(alu_acc_ld), 
     .o_ALU_ACC_OUTPUT(alu_acc_output),
+    .i_ALU_V_UPDATE(alu_v_update),
     .i_ALU_V_SET(alu_v_set), .i_ALU_V_RST(alu_v_rst),
     .o_Z(alu_flag_zero), .o_N(alu_flag_neg), .o_V(alu_flag_ovfl)
 );
@@ -488,7 +512,10 @@ assign  flag_output = {alu_flag_ovfl, reg_ovm, reg_intm, 4'b1111, reg_arp, 6'b11
 ////
 
 //RAM address source select(0 = direct, 1 = indirect)
-wire    [7:0]   ram_addr = if_opcodereg[7] ? ar_addr_output : {reg_dp, if_opcodereg[6:0]};
+wire            sst_direct = if_opcodereg[15:8] == 8'h7C && !if_opcodereg[7];
+wire    [7:0]   ram_addr = sst_direct
+    ? {1'b1, if_opcodereg[6:0]}
+    : if_opcodereg[7] ? ar_addr_output : {reg_dp, if_opcodereg[6:0]};
 reg             ram_dmov, ram_rd, ram_wr;
 
 IKA32010_ram u_ram (
@@ -555,7 +582,7 @@ always @(*) begin
     alu_modesel = ALU_ADD; alu_paz = NO; alu_pbz = NO; alu_pbdata = ALU_PBDATA_LONGWORD; alu_pbsel = ALU_SOURCE_SHFT;
 
     //ALU overflow flag set/reset
-    alu_v_set = NO; alu_v_rst = NO;
+    alu_v_set = NO; alu_v_rst = NO; alu_v_update = NO;
 
     //ACC load
     alu_acc_ld = NO;
@@ -632,7 +659,7 @@ always @(*) begin
 
                 //acknowledge interrupt
                 if_opcodereg_force_iack = NO;
-                int_ack = (int_rq) ? YES : NO;
+                int_ack = YES;
                 stk_push = NO; stk_data_sel = STACK_DATA_ACC;
                 `ifdef IKA32010_DISASSEMBLY 
                     if(int_rq) $display("IKA32010_", `IKA32010_DEVICE_ID, ": IRQ RECEIVED\n");
@@ -676,15 +703,12 @@ always @(*) begin
                 //aux register pointer
                 if(if_opcodereg[7]) begin 
                     reg_ar_inc = if_opcodereg[5]; reg_ar_dec = if_opcodereg[4]; 
-                    if(!if_opcodereg[3]) begin //AR register
-                        if(if_opcodereg[0]) reg_arp_set = YES;
-                        else                reg_arp_rst = YES;
-                    end
                 end
-                else begin
-                    if(reg_wrbus[8])  reg_arp_set = YES;
-                    else              reg_arp_rst = YES;
-                end
+                // LST restores ARP from the status word.  For indirect LST,
+                // the old ARP still selects/postmodifies the address AR, but
+                // the opcode's normally encoded next-ARP field is ignored.
+                if(reg_wrbus[8])  reg_arp_set = YES;
+                else              reg_arp_rst = YES;
 
                 `ifdef IKA32010_DISASSEMBLY 
                     disasm_type2("LST", if_opcodereg, if_pc, 0, 0);
@@ -780,6 +804,7 @@ always @(*) begin
             16'b0111_1111_1000_1000: begin
                 alu_modesel = ALU_ABS; alu_pbz = YES; //disable port B
                 alu_acc_ld = YES;
+                alu_v_update = YES;
 
                 `ifdef IKA32010_DISASSEMBLY 
                     disasm_type0("ABS", if_pc);
@@ -790,6 +815,7 @@ always @(*) begin
             16'b0000_????_????_????: begin
                 alu_modesel = ALU_ADD; //load from port B
                 alu_acc_ld = YES;
+                alu_v_update = YES;
                 sha_amt = {1'b0, if_opcodereg[11:8]};
 
                 if(if_opcodereg[7]) begin 
@@ -809,6 +835,7 @@ always @(*) begin
             16'b0110_0000_????_????: begin
                 alu_modesel = ALU_ADD; alu_pbdata = ALU_PBDATA_LONGWORD; //load from port B, low bits masked
                 alu_acc_ld = YES;
+                alu_v_update = YES;
                 sha_amt = 5'd16;
 
                 if(if_opcodereg[7]) begin 
@@ -828,6 +855,7 @@ always @(*) begin
             16'b0110_0001_????_????: begin
                 alu_modesel = ALU_ADD; alu_pbdata = ALU_PBDATA_LONGWORD; //load from port B
                 alu_acc_ld = YES;
+                alu_v_update = YES;
                 sha_ssup = YES;
 
                 if(if_opcodereg[7]) begin 
@@ -951,6 +979,7 @@ always @(*) begin
             16'b0001_????_????_????: begin
                 alu_modesel = ALU_SUB; //load from port B
                 alu_acc_ld = YES;
+                alu_v_update = YES;
                 sha_amt = {1'b0, if_opcodereg[11:8]};
 
                 if(if_opcodereg[7]) begin 
@@ -970,6 +999,7 @@ always @(*) begin
             16'b0110_0100_????_????: begin
                 //!!! next instruction cannot use the ACC !!!
                 alu_modesel = ALU_SUBC;
+                alu_v_update = YES;
                 sha_amt = 5'd15;
                 //ACC will be loaded next cycle
                 if(if_opcodereg[7]) begin 
@@ -989,6 +1019,7 @@ always @(*) begin
             16'b0110_0010_????_????: begin
                 alu_modesel = ALU_SUB; alu_pbdata = ALU_PBDATA_LONGWORD; //load from port B, low bits masked
                 alu_acc_ld = YES;
+                alu_v_update = YES;
                 sha_amt = 5'd16;
 
                 if(if_opcodereg[7]) begin 
@@ -1008,6 +1039,7 @@ always @(*) begin
             16'b0110_0011_????_????: begin
                 alu_modesel = ALU_SUB; alu_pbdata = ALU_PBDATA_LONGWORD; //load from port B
                 alu_acc_ld = YES;
+                alu_v_update = YES;
                 sha_ssup = YES;
 
                 if(if_opcodereg[7]) begin 
@@ -1474,6 +1506,7 @@ always @(*) begin
             16'b0111_1111_1000_1111: begin
                 alu_pbsel = ALU_SOURCE_MUL; alu_modesel = ALU_ADD;
                 alu_acc_ld = YES;
+                alu_v_update = YES;
 
                 `ifdef IKA32010_DISASSEMBLY 
                     disasm_type1("APAC", if_opcodereg, if_pc, 0);
@@ -1501,6 +1534,7 @@ always @(*) begin
             16'b0110_1100_????_????: begin
                 alu_pbsel = ALU_SOURCE_MUL; alu_modesel = ALU_ADD;
                 alu_acc_ld = YES;
+                alu_v_update = YES;
                 reg_t_ld = YES;
 
                 if(if_opcodereg[7]) begin 
@@ -1520,6 +1554,7 @@ always @(*) begin
             16'b0110_1011_????_????: begin
                 alu_pbsel = ALU_SOURCE_MUL; alu_modesel = ALU_ADD;
                 alu_acc_ld = YES;
+                alu_v_update = YES;
                 reg_t_ld = YES;
                 ram_dmov = YES;
 
@@ -1539,6 +1574,12 @@ always @(*) begin
             //MPY - Multiply with T register, store product in P register
             16'b0110_1101_????_????: begin
                 mul_en = YES; mul_op1_source_sel = MUL_OP1_SOURCE_RAM;
+
+                // The instruction after MPY must execute before a pending
+                // interrupt can be accepted.
+                if_opcodereg_force_iack = NO;
+                if_pc_modesel = PC_INCREASE;
+                stk_push = NO; stk_data_sel = STACK_DATA_ACC;
                 
                 if(if_opcodereg[7]) begin 
                     reg_ar_inc = if_opcodereg[5]; reg_ar_dec = if_opcodereg[4]; 
@@ -1556,6 +1597,11 @@ always @(*) begin
             //MPYK - Multiply T register with immediate operand; store product in P register
             16'b100?_????_????_????: begin
                 mul_en = YES; mul_op1_source_sel = MUL_OP1_SOURCE_IMM;
+
+                // MPYK has the same one-following-instruction protection.
+                if_opcodereg_force_iack = NO;
+                if_pc_modesel = PC_INCREASE;
+                stk_push = NO; stk_data_sel = STACK_DATA_ACC;
 
                 `ifdef IKA32010_DISASSEMBLY 
                     disasm_type3("MPYK", if_opcodereg, if_pc, 0, 1);
@@ -1576,6 +1622,7 @@ always @(*) begin
             16'b0111_1111_1001_0000: begin
                 alu_pbsel = ALU_SOURCE_MUL; alu_modesel = ALU_SUB;
                 alu_acc_ld = YES;
+                alu_v_update = YES;
 
                 `ifdef IKA32010_DISASSEMBLY 
                     disasm_type1("SPAC", if_opcodereg, if_pc, 0);
@@ -1775,6 +1822,7 @@ module IKA32010_alu (
     input   wire            i_ALU_ACC_LD,
     output  reg     [31:0]  o_ALU_ACC_OUTPUT,
 
+    input   wire            i_ALU_V_UPDATE,
     input   wire            i_ALU_V_SET, i_ALU_V_RST,
     output  reg             o_Z, o_N, o_V //Zero, Negative, oVerflow
 );
@@ -1793,7 +1841,7 @@ localparam  ALU_PBDATA_LOWWORD  = 2'd2;
 localparam  ALU_PBDATA_BYTE     = 2'd3;  
 
 //subc related
-reg             prev_subc, subc_divided;
+reg             prev_subc, subc_divided, prev_subc_ovfl;
 reg     [31:0]  prev_adder;
 
 //PORT A/B input generation
@@ -1855,22 +1903,33 @@ always @(*) begin
             ALU_AND : alu_output = port_a & {16'h0000, port_b[15:0]};
             ALU_OR  : alu_output = port_a | {16'h0000, port_b[15:0]};
             ALU_XOR : alu_output = port_a ^ {16'h0000, port_b[15:0]};
-            ALU_ABS : alu_output = alu_adder;
+            ALU_ABS : alu_output = i_ALU_OVM && alu_ovfl
+                ? 32'h7FFF_FFFF : alu_adder;
             ALU_ADD : alu_output = i_ALU_OVM ? alu_ovfl ? {~alu_adder31[31], {31{alu_adder31[31]}}} : alu_adder : alu_adder; //saturation
             ALU_SUB : alu_output = i_ALU_OVM ? alu_ovfl ? {~alu_adder31[31], {31{alu_adder31[31]}}} : alu_adder : alu_adder; //saturation
-            ALU_SUBC: alu_output = i_ALU_OVM ? alu_ovfl ? {~alu_adder31[31], {31{alu_adder31[31]}}} : alu_adder : alu_adder; //saturation
+            // TI specifies that SUBC affects OV but is never saturated by OVM.
+            ALU_SUBC: alu_output = alu_adder;
             default: alu_output = 32'h0000_0000;
         endcase
     end
 end
 
 //SUBC control, EX unit takes 1 cycle to process SUBC, but ALU doesn't
-always @(posedge i_EMUCLK) if(i_CEN) begin
-    if(i_ALU_MODESEL == ALU_SUBC && alu_output[31] == 1'b0) subc_divided <= 1'b1;
-    else subc_divided <= 1'b0;
+always @(posedge i_EMUCLK) begin
+    if(!i_RST_n) begin
+        subc_divided <= 1'b0;
+        prev_subc <= 1'b0;
+        prev_subc_ovfl <= 1'b0;
+        prev_adder <= 32'h0000_0000;
+    end
+    else if(i_CEN) begin
+        if(i_ALU_MODESEL == ALU_SUBC && alu_output[31] == 1'b0) subc_divided <= 1'b1;
+        else subc_divided <= 1'b0;
 
-    prev_subc <= i_ALU_MODESEL == ALU_SUBC;
-    prev_adder <= alu_output;
+        prev_subc <= i_ALU_MODESEL == ALU_SUBC;
+        prev_subc_ovfl <= alu_ovfl;
+        prev_adder <= alu_output;
+    end
 end
 
 //accumulator control
@@ -1892,7 +1951,10 @@ always @(posedge i_EMUCLK) begin
             if(alu_acc_ld) begin
                 o_Z <= alu_output == 32'h0000_0000;
                 o_N <= alu_output[31];
-                o_V <= alu_adder31[31] ^ alu_adder1[1];
+                if(prev_subc)
+                    o_V <= o_V | prev_subc_ovfl;
+                else if(i_ALU_V_UPDATE)
+                    o_V <= o_V | alu_ovfl;
             end
             else begin
                 case({i_ALU_V_SET, i_ALU_V_RST})
@@ -2019,7 +2081,11 @@ always @(posedge i_EMUCLK) begin
         if(i_MUL_EN) begin
             op0_latch <= signed'(i_OP0);
             op1_latch <= signed'(i_OP1);
-            result <= op0_latch * op1_latch;
+            // First-generation TMS32010 silicon documents this one multiply
+            // corner separately from the normal signed 16x16 result.
+            result <= op0_latch == 16'sh8000 && op1_latch == 16'sh8000
+                ? 32'shC000_0000
+                : op0_latch * op1_latch;
         end
     end
 end

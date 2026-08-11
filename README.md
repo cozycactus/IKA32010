@@ -59,6 +59,15 @@ IKA32010 u_main (
 * `make lint` elaborates the core with Verilator and reports lint warnings.
 * `make synth` synthesizes the core for the ECP5 architecture with Yosys. This checks the core RTL only; a board wrapper and pin constraints are still required for a bitstream.
 
+The focused conformance test also locks TI Rev. B behavior needed by the H3000:
+sticky `OV`, the `ABS` minimum-negative/`OVM` corner, unsaturated `SUBC`,
+`LAR`/`SAR` self-postmodify ordering, the first-generation multiplier's
+`$8000 * $8000 = $C0000000` result, direct-`SST` page-1 selection, indirect
+`LST` status/ARP ordering, and interrupt masking, held-low retrigger, and
+post-multiply deferral.  These are architectural checks; asynchronous INT pin
+phase, original-silicon prefetch timing, and board-level clock limits still
+require the physical oracle.
+
 ### ROM-free differential campaigns
 
 `tools/tms32010_differential.py` generates deterministic synthetic programs for
