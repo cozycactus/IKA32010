@@ -195,6 +195,10 @@ endtask
 initial begin
     // Let both internal RAM initializers settle, then perform a synchronous reset.
     repeat (8) @(posedge clk);
+    #1;
+    check_condition(men_n === 1'b1 && den_n === 1'b1 &&
+                    we_n === 1'b1 && data_out_oe === 1'b0,
+                    "asserted RS leaves every external bus control inactive");
     reset_n = 1'b1;
     repeat (4) @(posedge clk);
 

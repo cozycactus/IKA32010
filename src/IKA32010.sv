@@ -158,8 +158,8 @@ assign o_AOUT = busctrl_addr;
 
 always @(*) begin
     case(busctrl_mode[3])
-        1'b0: busctrl_addr <= if_pc; //program counter + data offset
-        1'b1: busctrl_addr <= {9'b0000_0000_0, if_opcodereg[10:8]}; //PA0 1 2
+        1'b0: busctrl_addr = if_pc; //program counter + data offset
+        1'b1: busctrl_addr = {9'b0000_0000_0, if_opcodereg[10:8]}; //PA0 1 2
     endcase
 end
 
@@ -176,8 +176,13 @@ end
 always @(posedge i_EMUCLK) begin
     if(!i_RS_n) begin
         busctrl_inlatch <= 16'h0000;
-
         if_opcodereg <= 16'h7F80;
+        // TMS32010 User's Guide Rev. B: asserted RS forces all three
+        // active-low bus controls inactive and tristates the data bus.
+        o_MEN_n <= 1'b1;
+        o_DEN_n <= 1'b1;
+        o_WE_n <= 1'b1;
+        o_DOUT_OE <= 1'b0;
     end
     else begin if(i_CLKIN_PCEN) begin
         if(cyclecntr == 2'd3) begin
@@ -1687,7 +1692,7 @@ always @(*) begin
                 if(ex_inst_cycle == 2'd0) begin
                     busctrl_req = COMMAND_OUT; busctrl_addr_muxsel = BUSCTRL_ADDR_PERIPHERAL;
                     if_pc_modesel = PC_HOLD;
-                    register_wrbus_source_sel <= WRBUS_SOURCE_RAM;
+                    register_wrbus_source_sel = WRBUS_SOURCE_RAM;
                     ex_inst_cycle_rst = NO;
 
                     //deny interrupt request
