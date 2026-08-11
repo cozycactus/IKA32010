@@ -19,6 +19,7 @@ reg             ram_we = 1'b0;
 reg     [7:0]   ram_address = 8'h00;
 reg     [15:0]  ram_data_in = 16'h0000;
 wire    [15:0]  ram_data_out;
+wire    [7:0]   ram_physical_address;
 
 reg             alu_reset_n = 1'b0;
 reg             alu_cen = 1'b0;
@@ -51,6 +52,8 @@ wire core_int_entry_accept = dut.int_entry_accept;
 `endif
 
 integer checks = 0;
+integer out_wait_cycles;
+integer out_active_samples;
 
 always #5 clk = ~clk;
 
@@ -80,7 +83,7 @@ IKA32010_ram ram_dut (
     .i_ADDR(ram_address),
     .i_DIN(ram_data_in),
     .o_DOUT(ram_data_out),
-    .o_PHYSICAL_ADDR()
+    .o_PHYSICAL_ADDR(ram_physical_address)
 );
 
 IKA32010_alu alu_dut (
@@ -268,22 +271,67 @@ initial begin
     ram_write(8'h9F, 16'h3333);
     ram_read_check(8'h8F, 16'h3333, "$9F and $8F share one physical cell");
 
-    // The top-level provenance pin exposes that same physical address.  It
-    // lets an H3000 bus wrapper prove that simultaneous PEL OUT operations
-    // came from the same C10 cell without exposing the RAM contents.
-    force dut.reg_dp = 1'b1;
-    force dut.if_opcodereg = 16'h007F;
+    // The RAM mapper exposes the physical address independently of contents.
+    // The top-level pin below carries this value during a real OUT transaction.
+    ram_address = 8'hFF;
     #1;
-    check_condition(data_address === 8'h8F,
-                    "top-level data address maps direct $FF to physical $8F");
-    force dut.if_opcodereg = 16'h0080;
-    force dut.ar_addr_output = 8'h9A;
+    check_condition(ram_physical_address === 8'h8F,
+                    "RAM address mapper maps direct $FF to physical $8F");
+    ram_address = 8'h9A;
     #1;
-    check_condition(data_address === 8'h8A,
-                    "top-level data address maps indirect $9A to physical $8A");
-    release dut.ar_addr_output;
+    check_condition(ram_physical_address === 8'h8A,
+                    "RAM address mapper maps indirect $9A to physical $8A");
+
+    // Exercise a real indirect OUT bus interval, not only the mapper in
+    // isolation.  Provenance must describe the pre-postmodify operand for
+    // every clock on which WE# is active; the later AR increment may change
+    // the observable address only after the physical write interval closes.
+    // Begin immediately after a cycle-counter wrap, so instruction cycle 0
+    // owns the complete OUT transaction before the later fetch/postmodify
+    // cycle. Starting one half-cycle before the wrap would synthesize an
+    // impossible mid-instruction state in this directed internal-state test.
+    while (dut.cyclecntr !== 2'd0)
+        @(negedge clk);
+    dut.reg_arp = 1'b0;
+    dut.reg_ar[0] = 16'h009A;
+    dut.u_ram.RAM[8'h8A] = 16'hCAFE;
+    dut.ex_inst_cycle = 2'd0;
+    force dut.if_opcodereg = 16'h4FA8; // OUT *+,PA7; retain ARP
+
+    out_wait_cycles = 0;
+    while (we_n !== 1'b0 && out_wait_cycles < 32) begin
+        @(posedge clk);
+        #1;
+        out_wait_cycles = out_wait_cycles + 1;
+    end
+    check_condition(we_n === 1'b0 && data_out_oe === 1'b1,
+        "indirect OUT reaches its active pin interval");
+
+    out_active_samples = 0;
+    while (we_n === 1'b0) begin
+        check_condition(data_address === 8'h8A,
+            "indirect OUT keeps the pre-postmodify physical address while WE# is active");
+        check_condition(address === 12'h007 && data_out === 16'hCAFE &&
+                        data_out_oe === 1'b1,
+            "indirect OUT keeps its PA7/data/OE tuple stable while WE# is active");
+        out_active_samples = out_active_samples + 1;
+        @(posedge clk);
+        #1;
+    end
+    check_condition(out_active_samples > 0,
+        "indirect OUT provenance was sampled during the active interval");
+
+    out_wait_cycles = 0;
+    while (dut.reg_ar[0][7:0] !== 8'h9B && out_wait_cycles < 32) begin
+        @(posedge clk);
+        #1;
+        out_wait_cycles = out_wait_cycles + 1;
+    end
+    check_condition(dut.reg_ar[0][7:0] === 8'h9B,
+        "indirect OUT applies its postincrement after the write interval");
+    check_condition(data_address === 8'h8B,
+        "provenance follows the updated AR only after OUT releases WE#");
     release dut.if_opcodereg;
-    release dut.reg_dp;
 
     // DMOV increments the logical address first. $8F + 1 is logical $90,
     // which aliases physical $80.
